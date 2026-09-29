@@ -1,0 +1,103 @@
+# Runtime parameters — loaded by AgentRegistry, passed as Graph(config=...).
+# This is a SEPARATE file from config/agent.yaml (the static manifest): agent.yaml
+# is AgentRegistry's discovery entry point, this file is the agent's own runtime
+# config, keyed by whatever your Graph/node code reads via self.config.get(...).
+# agent.yaml holds the static manifest; every runtime parameter lives here.
+#
+# Every key below is validated at startup by Graph._validate_config() — type,
+# range, enum, cross-field constraint, and unknown-key rejection. See
+# docs/02_design.md §Configurable surfaces — executable contract.
+
+max_retry: 3
+
+# No checkpointer: the template holds no cross-invocation graph state and does not
+# use interrupt(). PB-5 is auto-waived (checkpointing disabled), PB-7 auto-waived
+# (non-HITL). Both are declared explicitly rather than left to defaults.
+memory_enabled: false
+hitl:
+  enabled: false
+
+# --- Entity resolution (docs/02_design.md §Entity resolution contract) -------
+# Starting values for the deploying municipality to calibrate after STG
+# measurement; they are NOT domain constants.
+resolution_confidence_threshold: 0.85   # below this -> review queue (R_LOW_CONFIDENCE)
+resolution_margin: 0.15                 # top-vs-runner-up gap below this -> R_AMBIGUOUS_CANDIDATES
+candidate_top_k: 10                     # deterministic 2-gram candidate set size handed to the LLM
+candidate_min_bigram_hits: 2            # absolute minimum, never a ratio: a ratio raises the bar for
+                                        # long reports until no registry row can ever reach it
+
+# --- Provenance spans --------------------------------------------------------
+min_quoted_span_chars: 8                # an empty/1-char span makes `span in text` vacuously true
+max_quoted_span_chars: 200              # upper bound closes the echo path: a whole report body must not
+                                        # ride into State/storage disguised as a provenance span
+
+# --- Input size and quality gate (docs/02_design.md §S-2) -------------------
+max_report_chars: 8000
+max_records_per_request: 100            # reports per request; bounds the LLM call count and the size of
+                                        # one apply_ingest() transaction (user_input is always a 32-char
+                                        # envelope_ref, so this is unrelated to any input-size limit)
+max_note_chars: 500                     # human-authored adjudication note (feedback mode)
+max_replacement_char_ratio: 0.02        # U+FFFD share of NFKC-normalised length
+max_control_char_ratio: 0.01
+min_printable_ratio: 0.90
+
+# --- Payload isolation (docs/02_design.md §Text sanitization pipeline) ---------
+# The agent does NOT retain report originals. The payload store exists only to keep
+# raw text out of State for the duration of one request; this TTL bounds that window.
+# Provenance for later requests is self-contained: the persisted quoted_span plus its
+# evidence_digest, with no original text involved.
+payload_ttl_seconds: 300
+
+# --- Time basis --------------------------------------------------------------
+# The adapter fixes ONE UTC timestamp per request; nodes never call datetime.now().
+# This timezone is used for date-boundary interpretation and display only.
+business_timezone: "Asia/Tokyo"
+
+# --- Persistence (docs/02_design.md §Persistence layer and swap point) -------
+# File-backed SQLite is the interim backend. In-memory is TEST ONLY: damage status
+# that does not survive a restart is useless during a disaster response.
+repository_path: "./data/gov_c2_086.sqlite3"
+
+# --- Output guard ------------------------------------------------------------
+# Assertive safety statements are downgraded to "needs confirmation", never blocked
+# outright (ClaimConsistencyCheckAgent precedent). "downgrade" is the only allowed value — there is
+# deliberately no "allow".
+assertive_phrase_action: "downgrade"
+
+# --- Urgency rules (docs/02_design.md §Urgency derivation) -------------------
+# MUNICIPALITY-APPROVED CONTENT. `rules` is evaluated top-down; the FIRST match
+# wins, so rule order is part of the approved policy. There is no built-in default
+# rule set: if this key or `default_urgency` is absent the agent fails at startup
+# with E_CONFIG_MISSING rather than inventing an urgency. When no rule matches,
+# `default_urgency` applies and `applied_rule_id` is the reserved value "U_DEFAULT".
+# `when` keys are restricted to {importance, severity_observed, category,
+# access_blocked}; an unknown key fails startup with E_CONFIG_RULE_KEY.
+urgency_rules:
+  default_urgency: "normal"
+  rules:
+    - id: "U1"
+      when:
+        importance: ["critical"]
+        access_blocked: true
+      urgency: "immediate"
+    - id: "U2"
+      when:
+        severity_observed: ["structural_damage"]
+      urgency: "immediate"
+    - id: "U3"
+      when:
+        importance: ["critical", "high"]
+        severity_observed: ["partial_damage"]
+      urgency: "high"
+    - id: "U4"
+      when:
+        access_blocked: true
+      urgency: "high"
+    - id: "U5"
+      when:
+        severity_observed: ["partial_damage", "utility_outage"]
+      urgency: "normal"
+
+# The LLM client is injected as config["llm"] by the caller (src/api/server.py or
+# AgentRegistry). No model id or concrete client is written into the template.
+# Provider timeout is the injecting side's responsibility.
